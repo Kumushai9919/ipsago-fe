@@ -6,13 +6,14 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Progress } from "@/components/ui/progress"
-import { Mic, MicOff, Send, Volume2, Loader2, CheckCircle, ArrowRight } from 'lucide-react'
+import { Mic, MicOff, Send, Volume2, VolumeX, Loader2, CheckCircle, ArrowRight } from 'lucide-react'
 import Link from "next/link"
 import Image from "next/image"
 import { useRouter } from 'next/navigation'
 import { Badge } from "@/components/ui/badge"
 import { GeminiLiveSDK } from "@/lib/gemini-live-sdk"
 import { InterviewContext } from "@/lib/gemini"
+import { AudioRecorder, transcribeAudio, playTextToSpeech } from "@/lib/recordAudio"
 
 type Message = {
   role: "ai" | "user"
@@ -34,6 +35,7 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
   const [interviewComplete, setInterviewComplete] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const [interviewType, setInterviewType] = useState<'personality' | 'technical'>('personality')
+  const [speakerEnabled, setSpeakerEnabled] = useState(false) // TTS toggle
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const hasInitialized = useRef(false)
   const geminiClientRef = useRef<GeminiLiveSDK | null>(null)
@@ -41,6 +43,7 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
   const audioContextRef = useRef<AudioContext | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioProcessorRef = useRef<ScriptProcessorNode | null>(null)
+  const audioRecorderRef = useRef<AudioRecorder | null>(null) // New audio recorder
 
   const totalQuestions = 8
   const progress = (questionCount / totalQuestions) * 100
@@ -206,17 +209,18 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
     }
   }, [interviewType])
 
-  const handleSendMessage = async () => {
-    if (!currentInput.trim() || isLoading) return
+  const handleSendMessage = async (messageTextOverride?: string) => {
+    const messageText = messageTextOverride || currentInput
+    
+    if (!messageText.trim() || isLoading) return
 
     const userMessage: Message = {
       role: "user",
-      content: currentInput,
+      content: messageText,
       timestamp: new Date()
     }
 
     setMessages((prev) => [...prev, userMessage])
-    const messageText = currentInput
     setCurrentInput("")
     setIsLoading(true)
 
@@ -316,6 +320,18 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
         setMessages((prev) => [...prev, aiMessage])
         setIsLoading(false)
         
+        // Play TTS if speaker is enabled
+        if (speakerEnabled && data.message) {
+          try {
+            setIsAISpeaking(true)
+            await playTextToSpeech(data.message)
+            setIsAISpeaking(false)
+          } catch (error) {
+            console.error('❌ TTS playback failed:', error)
+            setIsAISpeaking(false)
+          }
+        }
+        
         const newQuestionCount = questionCount + 1
         setQuestionCount(newQuestionCount)
         
@@ -364,8 +380,8 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
 
   const toggleRecording = async () => {
     if (isRecording) {
-      // Stop recording
-      stopRecording()
+      // Stop recording and transcribe
+      await stopRecording()
     } else {
       // Start recording
       await startRecording()
@@ -374,123 +390,68 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
 
   const startRecording = async () => {
     try {
-      console.log('🎤 Requesting microphone access...')
+      console.log('🎤 Starting voice recording...')
       
-      // Request microphone permission
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 24000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      })
-
-      console.log('✅ Microphone access granted')
-      mediaStreamRef.current = stream
+      // Create new audio recorder
+      const recorder = new AudioRecorder()
+      audioRecorderRef.current = recorder
+      
+      await recorder.startRecording()
       setIsRecording(true)
-
-      // If Gemini Live is connected, stream audio to it
-      if (geminiClientRef.current && geminiClientRef.current.isConnected()) {
-        console.log('🎙️ Streaming audio to Gemini Live...')
-        
-        // Create audio context for processing
-        const audioContext = new AudioContext({ sampleRate: 24000 })
-        audioContextRef.current = audioContext
-        
-        const source = audioContext.createMediaStreamSource(stream)
-        const processor = audioContext.createScriptProcessor(4096, 1, 1)
-        audioProcessorRef.current = processor
-
-        processor.onaudioprocess = (e) => {
-          const inputData = e.inputBuffer.getChannelData(0)
-          
-          // Convert Float32Array to Int16Array (PCM)
-          const pcmData = new Int16Array(inputData.length)
-          for (let i = 0; i < inputData.length; i++) {
-            const s = Math.max(-1, Math.min(1, inputData[i]))
-            pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
-          }
-
-          // Send audio chunks to Gemini Live
-          if (geminiClientRef.current) {
-            geminiClientRef.current.sendAudio(pcmData.buffer)
-          }
-        }
-
-        source.connect(processor)
-        processor.connect(audioContext.destination)
-        
-        console.log('✅ Audio streaming started')
-      } else {
-        console.warn('⚠️ Gemini Live not connected - recording locally only')
-        
-        // Fallback: Use MediaRecorder for local recording
-        const mediaRecorder = new MediaRecorder(stream)
-        mediaRecorderRef.current = mediaRecorder
-        
-        const audioChunks: Blob[] = []
-        
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            audioChunks.push(event.data)
-          }
-        }
-        
-        mediaRecorder.onstop = async () => {
-          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
-          console.log('🎤 Audio recorded:', audioBlob.size, 'bytes')
-          
-          // Convert to text using Web Speech API or send to backend
-          // For now, just log
-          console.log('💡 Tip: Connect to Gemini Live for real-time voice interaction')
-        }
-        
-        mediaRecorder.start(100) // Collect data every 100ms
-      }
+      
+      console.log('✅ Recording started')
     } catch (error) {
-      console.error('❌ Microphone access denied or error:', error)
+      console.error('❌ Failed to start recording:', error)
       alert('Microphone access is required for voice input. Please grant permission and try again.')
       setIsRecording(false)
     }
   }
 
-  const stopRecording = () => {
-    console.log('🛑 Stopping recording...')
-    
-    // Stop media stream
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop())
-      mediaStreamRef.current = null
-    }
+  const stopRecording = async () => {
+    try {
+      console.log('🛑 Stopping recording...')
+      
+      if (!audioRecorderRef.current) {
+        console.error('❌ No active recorder')
+        return
+      }
 
-    // Stop audio processor
-    if (audioProcessorRef.current) {
-      audioProcessorRef.current.disconnect()
-      audioProcessorRef.current = null
-    }
+      setIsRecording(false)
+      setIsLoading(true)
 
-    // Close audio context
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
+      // Stop recording and get audio blob
+      const audioBlob = await audioRecorderRef.current.stopRecording()
+      console.log('✅ Recording stopped, blob size:', audioBlob.size, 'bytes')
 
-    // Stop media recorder
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop()
-      mediaRecorderRef.current = null
-    }
+      // Transcribe audio to text
+      console.log('🔄 Transcribing audio...')
+      const transcribedText = await transcribeAudio(audioBlob)
+      console.log('✅ Transcription:', transcribedText)
 
-    setIsRecording(false)
-    console.log('✅ Recording stopped')
+      // Send transcribed text as message
+      await handleSendMessage(transcribedText)
+      
+      // Cleanup
+      audioRecorderRef.current = null
+    } catch (error) {
+      console.error('❌ Failed to process recording:', error)
+      setIsRecording(false)
+      setIsLoading(false)
+      alert('Failed to transcribe audio. Please try again.')
+    }
   }
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopRecording()
+      // Cleanup audio recorder if active
+      if (audioRecorderRef.current && audioRecorderRef.current.isRecording()) {
+        audioRecorderRef.current.stopRecording().catch(console.error)
+      }
+      // Cleanup Gemini connection
+      if (geminiClientRef.current) {
+        geminiClientRef.current.disconnect()
+      }
     }
   }, [])
 
@@ -655,25 +616,61 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
                     onChange={(e) => setCurrentInput(e.target.value)}
                     onKeyDown={handleKeyPress}
                     className="min-h-[60px] max-h-[200px] resize-none"
-                    disabled={isLoading}
+                    disabled={isLoading || isRecording}
                   />
                   
-                  <Button
-                    size="icon"
-                    className="flex-shrink-0"
-                    onClick={handleSendMessage}
-                    disabled={!currentInput.trim() || isLoading}
-                  >
-                    <Send className="size-4" />
-                  </Button>
+                  <div className="flex flex-col gap-2">
+                    {/* Mic Button */}
+                    <Button
+                      size="icon"
+                      variant={isRecording ? "destructive" : "outline"}
+                      className="flex-shrink-0"
+                      onClick={toggleRecording}
+                      disabled={isLoading}
+                      title={isRecording ? "Stop recording" : "Start voice input"}
+                    >
+                      {isRecording ? <MicOff className="size-4" /> : <Mic className="size-4" />}
+                    </Button>
+                    
+                    {/* Send Button */}
+                    <Button
+                      size="icon"
+                      className="flex-shrink-0"
+                      onClick={() => handleSendMessage()}
+                      disabled={!currentInput.trim() || isLoading || isRecording}
+                    >
+                      <Send className="size-4" />
+                    </Button>
+                  </div>
                 </div>
                 
                 <div className="flex items-center justify-between mt-3 text-xs text-muted-foreground">
                   <div className="flex items-center gap-4">
-                    {isLoading && (
+                    {/* Speaker Toggle */}
+                    <Button
+                      variant={speakerEnabled ? "default" : "outline"}
+                      size="sm"
+                      className="h-7 px-3 gap-2"
+                      onClick={() => setSpeakerEnabled(!speakerEnabled)}
+                      title={speakerEnabled ? "Disable AI voice" : "Enable AI voice"}
+                    >
+                      {speakerEnabled ? <Volume2 className="size-3" /> : <VolumeX className="size-3" />}
+                      <span className="text-xs">
+                        {speakerEnabled ? "Voice ON" : "Voice OFF"}
+                      </span>
+                    </Button>
+                    
+                    {isRecording && (
+                      <span className="flex items-center gap-2 text-red-500 animate-pulse">
+                        <span className="size-2 rounded-full bg-red-500"></span>
+                        Recording...
+                      </span>
+                    )}
+                    
+                    {isLoading && !isRecording && (
                       <span className="flex items-center gap-2 text-primary">
                         <Loader2 className="size-4 animate-spin" />
-                        AI가 답변을 생성 중입니다...
+                        {isAISpeaking ? 'AI가 답변 중입니다...' : 'AI가 답변을 생성 중입니다...'}
                       </span>
                     )}
                   </div>
