@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge"
 import { GeminiLiveSDK } from "@/lib/gemini-live-sdk"
 import { InterviewContext } from "@/lib/gemini"
 import { AudioRecorder, transcribeAudio, playTextToSpeech } from "@/lib/recordAudio"
+import { InterviewTimer } from './interview-timer'
 
 type Message = {
   role: "ai" | "user"
@@ -21,7 +22,7 @@ type Message = {
   timestamp: Date
 }
 
-type InterviewPhase = "intro" | "technical" | "behavioral" | "closing"
+type InterviewPhase = "intro" | "technical" | "behavioral" | "closing" | "feedback"
 
 export function InterviewInterface({ jobId }: { jobId: string }) {
   const router = useRouter()
@@ -436,13 +437,16 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
         const newQuestionCount = questionCount + 1
         setQuestionCount(newQuestionCount)
         
-        // Update phases
+        // Update phases with feedback phase before completion
         if (newQuestionCount === 3) setInterviewPhase("technical")
         else if (newQuestionCount === 5) setInterviewPhase("behavioral")
         else if (newQuestionCount === 7) setInterviewPhase("closing")
-        
-        if (newQuestionCount >= totalQuestions) {
-          setInterviewComplete(true)
+        else if (newQuestionCount === 8) {
+          // Enter feedback phase
+          setInterviewPhase("feedback")
+          setTimeout(() => {
+            setInterviewComplete(true)
+          }, 3000) // Show feedback phase for 3 seconds
         }
       } else {
         // No connection at all - should not happen but handle gracefully
@@ -575,6 +579,7 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
       case "technical": return "Technical Questions"
       case "behavioral": return "Behavioral Questions"
       case "closing": return "Closing"
+      case "feedback": return "Performance Summary"
     }
   }
 
@@ -584,6 +589,7 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
       case "technical": return "bg-purple-500"
       case "behavioral": return "bg-green-500"
       case "closing": return "bg-orange-500"
+      case "feedback": return "bg-pink-500"
     }
   }
 
@@ -615,6 +621,38 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
               </div>
             </div>
           </div>
+ 
+        
+        {/* INTERVIEW TIMER HERE */}
+        {interviewStarted && (
+          <div className="mt-4">
+            <InterviewTimer 
+              duration={20} // 20 minutes for the full interview
+              phase={interviewPhase}
+              onTimeUp={() => {
+                console.log('⏰ Interview time is up!')
+                setInterviewComplete(true)
+                // Add a final message when time is up
+                const timeUpMessage: Message = {
+                  role: "ai",
+                  content: "Time's up! Thank you for your responses. Let's wrap up the interview and review your feedback.",
+                  timestamp: new Date()
+                }
+                setMessages(prev => [...prev, timeUpMessage])
+              }}
+              onPhaseChange={(newPhase) => {
+                setInterviewPhase(newPhase as InterviewPhase)
+                // Add a phase change message
+                const phaseMessage: Message = {
+                  role: "ai",
+                  content: `Great! Let's move to the ${newPhase} phase of the interview.`,
+                  timestamp: new Date()
+                }
+                setMessages(prev => [...prev, phaseMessage])
+              }}
+            />
+          </div>
+        )}
           
           {/* Interview Type Navigation */}
           <div className="mt-4 flex items-center gap-3 pb-3">
