@@ -15,6 +15,7 @@ import { GeminiLiveSDK } from "@/lib/gemini-live-sdk"
 import { InterviewContext } from "@/lib/gemini"
 import { AudioRecorder, transcribeAudio, playTextToSpeech } from "@/lib/recordAudio"
 import { InterviewTimer } from './interview-timer'
+import { fetchWithRetry, getErrorMessage } from "@/lib/api-helpers"
 
 type Message = {
   role: "ai" | "user"
@@ -300,7 +301,7 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
           resumeLength: userProfile.resumeText?.length || 0
         })
 
-        const response = await fetch('/api/interview/openai-chat', {
+        const response = await fetchWithRetry('/api/interview/openai-chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -322,7 +323,7 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
             conversationHistory,
             userMessage: messageText
           })
-        })
+        }, 3)
 
         if (!response.ok || !response.body) {
           const errorText = await response.text()
@@ -463,10 +464,11 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
         setQuestionCount(prev => prev + 1)
       }
     } catch (error) {
-      console.error('❌ Error sending message:', error)
-      // Ultimate fallback
+      const errorMessage = getErrorMessage(error)
+      console.error('❌ Interview error:', errorMessage)
+      
       await new Promise((resolve) => setTimeout(resolve, 500))
-      const fallbackText = "Thank you for sharing. Could you tell me more about your experience with that?"
+      const fallbackText = "I apologize for the interruption. Could you please repeat your last response?"
 
       if (aiMessageIndex !== -1) {
         setMessages((prev) =>
@@ -485,7 +487,6 @@ export function InterviewInterface({ jobId }: { jobId: string }) {
 
       setIsLoading(false)
       setIsStreamingResponse(false)
-      setQuestionCount(prev => prev + 1)
     }
   }
 
